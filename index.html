@@ -103,8 +103,17 @@ h1,h2,h3{font-family:Georgia,serif;}
 <script src="native.js"></script>
 <script>
 /* ===================== SAVE ===================== */
-const SAVE_KEY='fortuna_save_v1';
-function defaultSave(){return{ coins:60, worldsUnlocked:1, soundOn:true, musicOn:true, removeAds:false, skin:'gema' };}
+const SAVE_KEY='fortuna_save_v2';
+function defaultSave(){return{
+  coins:60, worldsUnlocked:1, soundOn:true, musicOn:true, removeAds:false, skin:'gema',
+  xp:0, level:1,
+  stats:{racesPlayed:0, racesWon:0, duelsWon:0, chestsOpened:0, starsCollected:0},
+  winStreak:0, bestWinStreak:0,
+  lastLoginDate:null, loginStreak:0,
+  daily:{date:null, missions:[], snapshot:{}, claimed:[]},
+  achClaimed:[],
+  hardMode:false
+};}
 function loadSave(){ try{const r=JSON.parse(localStorage.getItem(SAVE_KEY)); return r?Object.assign(defaultSave(),r):defaultSave();}catch(e){return defaultSave();} }
 function persist(){ localStorage.setItem(SAVE_KEY, JSON.stringify(S)); }
 let S=loadSave();
@@ -226,6 +235,71 @@ function genBoard(world){
   return {types, portalPair: portals};
 }
 
+/* ===================== PROGRESIÓN: nivel, rachas, misiones, logros ===================== */
+function todayStr(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function xpForLevel(lv){ return 40+lv*35; }
+function addXp(n){
+  S.xp+=n;
+  let leveled=false;
+  while(S.xp>=xpForLevel(S.level)){ S.xp-=xpForLevel(S.level); S.level++; S.coins+=15+S.level*3; leveled=true; }
+  persist();
+  return leveled;
+}
+// racha de ingreso diario: se llama una vez al arrancar la app
+function checkLoginStreak(){
+  const today=todayStr();
+  if(S.lastLoginDate===today) return null;
+  let streak=1;
+  if(S.lastLoginDate){
+    const prev=new Date(S.lastLoginDate+'T00:00:00'), tod=new Date(today+'T00:00:00');
+    const diffDays=Math.round((tod-prev)/86400000);
+    streak = diffDays===1 ? (S.loginStreak%7)+1 : 1;
+  }
+  S.loginStreak=streak; S.lastLoginDate=today;
+  const bonus=10+streak*5;
+  S.coins+=bonus; persist();
+  return {streak,bonus};
+}
+const MISSION_POOL=[
+  {id:'play1', desc:'Jugá 1 carrera', stat:'racesPlayed', target:1, reward:15},
+  {id:'play3', desc:'Jugá 3 carreras', stat:'racesPlayed', target:3, reward:30},
+  {id:'win1', desc:'Ganá 1 carrera', stat:'racesWon', target:1, reward:25},
+  {id:'chest3', desc:'Abrí 3 cofres', stat:'chestsOpened', target:3, reward:20},
+  {id:'duel2', desc:'Ganá 2 duelos', stat:'duelsWon', target:2, reward:25},
+  {id:'star2', desc:'Conseguí 2 estrellas de poder', stat:'starsCollected', target:2, reward:20}
+];
+function ensureDaily(){
+  const today=todayStr();
+  if(S.daily.date===today) return;
+  const rng=mulberry32(parseInt(today.replace(/-/g,''),10));
+  const pool=MISSION_POOL.slice();
+  const picked=[];
+  while(picked.length<3 && pool.length){ picked.push(pool.splice(Math.floor(rng()*pool.length),1)[0]); }
+  S.daily={date:today, missions:picked, snapshot:Object.assign({},S.stats), claimed:[]};
+  persist();
+}
+function missionProgress(m){ return Math.max(0, (S.stats[m.stat]||0) - (S.daily.snapshot[m.stat]||0)); }
+function claimMission(id){
+  const m=S.daily.missions.find(x=>x.id===id); if(!m||S.daily.claimed.includes(id)) return;
+  if(missionProgress(m)<m.target) return;
+  S.coins+=m.reward; S.daily.claimed.push(id); addXp(Math.round(m.reward/2)); persist();
+}
+const ACHIEVEMENTS=[
+  {id:'a1', desc:'Jugá tu primera carrera', stat:'racesPlayed', target:1, reward:15},
+  {id:'a2', desc:'Jugá 10 carreras', stat:'racesPlayed', target:10, reward:40},
+  {id:'a3', desc:'Jugá 50 carreras', stat:'racesPlayed', target:50, reward:120},
+  {id:'a4', desc:'Ganá 5 carreras', stat:'racesWon', target:5, reward:50},
+  {id:'a5', desc:'Ganá 25 carreras', stat:'racesWon', target:25, reward:150},
+  {id:'a6', desc:'Abrí 20 cofres', stat:'chestsOpened', target:20, reward:60},
+  {id:'a7', desc:'Ganá 15 duelos', stat:'duelsWon', target:15, reward:70},
+  {id:'a8', desc:'Conseguí 15 estrellas de poder', stat:'starsCollected', target:15, reward:60}
+];
+function claimAchievement(id){
+  const a=ACHIEVEMENTS.find(x=>x.id===id); if(!a||S.achClaimed.includes(id)) return;
+  if((S.stats[a.stat]||0)<a.target) return;
+  S.coins+=a.reward; S.achClaimed.push(id); addXp(Math.round(a.reward/2)); persist();
+}
+
 /* ===================== ROUTER ===================== */
 let route={screen:'menu',params:{}};
 function go(screen,params){ route={screen,params:params||{}}; render(); }
@@ -261,23 +335,44 @@ function confettiBurst(container,n){ const colors=['#ffd24d','#ff5d7a','#4fd1ff'
 
 /* ===================== MENU ===================== */
 const SCREENS={};
+function hasClaimable(){
+  ensureDaily();
+  const dailyReady = S.daily.missions.some(m=>!S.daily.claimed.includes(m.id) && missionProgress(m)>=m.target);
+  const achReady = ACHIEVEMENTS.some(a=>!S.achClaimed.includes(a.id) && (S.stats[a.stat]||0)>=a.target);
+  return dailyReady||achReady;
+}
 SCREENS.menu=function(){
+  ensureDaily();
   const s=el('div','screen'); bgFx(s,['#ff8a3d','#4fd1ff','#b36bff','#ffd24d']); lights(s,20);
   const top=el('div','topbar');
-  top.appendChild(el('div','coincount','<span class="coin-ic"></span>'+S.coins));
+  const left=el('div','row'); left.style.gap='8px';
+  left.appendChild(el('div','coincount','<span class="coin-ic"></span>'+S.coins));
+  const lvl=el('div','coincount','⭐ Nv.'+S.level); lvl.style.color='var(--gold2)';
+  left.appendChild(lvl);
+  top.appendChild(left);
   const set=el('div','btn ghost','⚙'); set.style.padding='8px 12px'; set.onclick=()=>{Aud.sfx('click');go('settings');};
   top.appendChild(set); s.appendChild(top);
+
+  if(loginBanner){
+    const banner=el('div','small popanim', '🔥 Racha de '+loginBanner.streak+' día'+(loginBanner.streak===1?'':'s')+' · +'+loginBanner.bonus+' 💰 de regalo');
+    banner.style.textAlign='center'; banner.style.color='var(--gold2)'; banner.style.fontWeight='800'; banner.style.padding='4px 10px';
+    s.appendChild(banner);
+    loginBanner=null;
+  }
+
   const mid=el('div','center'); mid.style.flex='1'; mid.style.justifyContent='center'; mid.style.gap='20px';
   const orb=el('div','worldorb'); orb.style.width='100px'; orb.style.height='100px'; orb.style.background='radial-gradient(circle at 35% 30%,#fff6c8,var(--gold) 60%,#c98f1f)'; orb.style.color='var(--gold)'; orb.innerHTML='<span style="font-size:46px;">🎲</span>';
   mid.appendChild(orb);
   const h1=el('h1','title'); h1.style.fontSize='32px'; h1.style.margin='0'; h1.textContent='Fortuna Mágica';
   mid.appendChild(h1);
   mid.appendChild(el('div','small','La Gran Carrera • Tablero de aventura'));
+  if(S.winStreak>0) mid.appendChild(el('div','small','🔥 Racha de victorias: '+S.winStreak+' (mejor: '+S.bestWinStreak+')'));
   const btns=el('div','col'); btns.style.width='78%'; btns.style.marginTop='8px';
   const bPlay=el('div','btn primary','🎲 Jugar'); bPlay.onclick=()=>{Aud.sfx('click');Aud.startPad();go('worldselect');};
+  const bMissions=el('div','btn','🎯 Misiones'+(hasClaimable()?' ●':'')); bMissions.onclick=()=>{Aud.sfx('click');go('missions');};
   const bShop=el('div','btn','💰 Tienda'); bShop.onclick=()=>{Aud.sfx('click');go('shop');};
   const bHelp=el('div','btn ghost','📜 Cómo se juega'); bHelp.onclick=()=>{Aud.sfx('click');go('rules');};
-  btns.appendChild(bPlay); btns.appendChild(bShop); btns.appendChild(bHelp);
+  btns.appendChild(bPlay); btns.appendChild(bMissions); btns.appendChild(bShop); btns.appendChild(bHelp);
   mid.appendChild(btns);
   s.appendChild(mid);
   Aud.startPad();
@@ -311,6 +406,17 @@ SCREENS.worldselect=function(){
   top.appendChild(el('div','coincount','<span class="coin-ic"></span>'+S.coins)); s.appendChild(top);
   s.appendChild(el('h2','title',' Elegí un Mundo')).style.textAlign='center';
   const wrap=el('div','col scroll'); wrap.style.padding='0 16px 16px';
+  if(S.hardModeUnlocked){
+    const hc=el('div','worldcard');
+    const info=el('div','col'); info.style.flex='1'; info.style.gap='2px';
+    info.appendChild(el('div',null,'<b>⚔ Modo Difícil</b>'));
+    info.appendChild(el('p','small','Más trampas y duelos, +50% de monedas. ¡Para seguir desafiándote!'));
+    hc.appendChild(info);
+    const t=el('div','toggle'+(S.hardMode?' on':'')); t.appendChild(el('div','knob'));
+    t.onclick=()=>{ S.hardMode=!S.hardMode; persist(); Aud.sfx('click'); go('worldselect'); };
+    hc.appendChild(t);
+    wrap.appendChild(hc);
+  }
   WORLDS.forEach((w,idx)=>{
     const unlocked= idx < S.worldsUnlocked;
     const card=el('div','worldcard'+(unlocked?'':' locked'));
@@ -330,10 +436,12 @@ SCREENS.worldselect=function(){
 /* ===================== MATCH STATE ===================== */
 let M=null;
 function startMatch(worldIdx){
-  const world=WORLDS[worldIdx];
+  const base=WORLDS[worldIdx];
+  const hard = S.hardMode && S.hardModeUnlocked;
+  const world = hard ? Object.assign({}, base, {trapW:base.trapW+2, duelW:base.duelW+1}) : base;
   const board=genBoard(world);
   M={
-    worldIdx, world, board,
+    worldIdx, world, board, hardMode:hard,
     players:[
       {id:0,name:'Vos',isBot:false,pos:0,color:SKINS[S.skin].color,shield:false},
       {id:1,name:'Rival Rojo',isBot:true,pos:0,color:PLAYER_COLORS[1],shield:false},
@@ -361,14 +469,14 @@ function doDuel(player){
   const rival=nearestRival(player.id); if(!rival) return;
   const r1=1+Math.floor(Math.random()*6), r2=1+Math.floor(Math.random()*6);
   Aud.sfx('duel');
-  if(r1>r2){ player.pos=Math.min(NTILES-1,player.pos+2); rival.pos=Math.max(0,rival.pos-2); }
+  if(r1>r2){ player.pos=Math.min(NTILES-1,player.pos+2); rival.pos=Math.max(0,rival.pos-2); if(player.id===0) S.stats.duelsWon++; }
   else if(r2>r1){ rival.pos=Math.min(NTILES-1,rival.pos+2); player.pos=Math.max(0,player.pos-2); }
   M.duelResult={a:player.name,b:rival.name,r1,r2};
 }
 function applyTile(player){
   const t=tileAt(player.pos);
   M.justLandedPos=player.pos; M.justMovedId=player.id;
-  if(t==='chest'){ const gain=8+Math.floor(Math.random()*10); if(!player.isBot){ S.coins+=gain; persist(); } Aud.sfx('coin'); M.popup={text:'+'+gain+' 💰', color:'var(--gold)'}; M.flashColor='rgba(255,204,0,.35)'; if(!player.isBot) M.burst=true; }
+  if(t==='chest'){ const gain=8+Math.floor(Math.random()*10); if(!player.isBot){ S.coins+=gain; S.stats.chestsOpened++; persist(); } Aud.sfx('coin'); M.popup={text:'+'+gain+' 💰', color:'var(--gold)'}; M.flashColor='rgba(255,204,0,.35)'; if(!player.isBot) M.burst=true; }
   else if(t==='trap'){
     if(player.shield){ player.shield=false; M.popup={text:'Escudo bloqueó la trampa', color:'#7fd6ff'}; }
     else {
@@ -380,7 +488,7 @@ function applyTile(player){
     }
   }
   else if(t==='portal'){ const pair=M.board.portalPair; const other= pair[0]===player.pos? pair[1]:pair[0]; player.pos=other; Aud.sfx('portal'); M.popup={text:'¡Portal!', color:'var(--portal)'}; M.flashColor='rgba(224,0,255,.3)'; }
-  else if(t==='star'){ Aud.sfx('star'); const r=Math.random()<0.5; if(r){ player.shield=true; M.popup={text:'✦ Escudo', color:'var(--star)'}; } else { player.extraTurn=true; M.popup={text:'✦ Turno Extra', color:'var(--star)'}; } M.flashColor='rgba(255,238,0,.3)'; if(!player.isBot) M.burst=true; }
+  else if(t==='star'){ Aud.sfx('star'); const r=Math.random()<0.5; if(r){ player.shield=true; M.popup={text:'✦ Escudo', color:'var(--star)'}; } else { player.extraTurn=true; M.popup={text:'✦ Turno Extra', color:'var(--star)'}; } M.flashColor='rgba(255,238,0,.3)'; if(!player.isBot){ M.burst=true; S.stats.starsCollected++; } }
   else if(t==='duel'){ doDuel(player); M.popup={text:'¡Duelo!', color:'var(--duel)'}; M.flashColor='rgba(255,109,0,.3)'; }
   else if(t==='meta'){ M.over=true; M.winnerId=player.id; Aud.sfx(player.isBot?'lose':'win'); }
 }
@@ -389,13 +497,24 @@ function finishMatchRewards(){
   const human=M.players[0];
   let place=sorted.findIndex(p=>p.id===0);
   let gain=0;
+  const won = !M.surrendered && M.winnerId===0;
   if(M.surrendered){ place=M.players.length-1; gain=5; }
-  else if(M.winnerId===0) gain=40+M.worldIdx*10;
+  else if(won) gain=40+M.worldIdx*10;
   else gain= place===1? 18 : 8;
+  if(M.hardMode) gain=Math.round(gain*1.5);
   S.coins+=gain;
-  if(M.winnerId===0 && M.worldIdx===S.worldsUnlocked-1 && S.worldsUnlocked<WORLDS.length) S.worldsUnlocked++;
+  S.stats.racesPlayed++;
+  if(won){
+    S.stats.racesWon++;
+    S.winStreak++; S.bestWinStreak=Math.max(S.bestWinStreak,S.winStreak);
+  } else {
+    S.winStreak=0;
+  }
+  if(won && M.worldIdx===S.worldsUnlocked-1 && S.worldsUnlocked<WORLDS.length) S.worldsUnlocked++;
+  if(S.worldsUnlocked>=WORLDS.length) S.hardModeUnlocked=true;
+  const leveled=addXp(Math.round(gain/2));
   persist();
-  return {gain, place:place+1, won:M.winnerId===0};
+  return {gain, place:place+1, won, leveled};
 }
 
 SCREENS.match=function(){
@@ -403,7 +522,7 @@ SCREENS.match=function(){
   s.style.background='radial-gradient(1100px 760px at 50% -8%,'+M.world.bg2+' 0%, '+M.world.bg1+' 55%, #05040f 100%)';
   const top=el('div','topbar');
   const back=el('div','btn ghost','✕'); back.onclick=()=>{ Aud.sfx('click'); Aud.startPad(); go('worldselect'); }; top.appendChild(back);
-  top.appendChild(el('div','small',M.world.name));
+  top.appendChild(el('div','small',M.world.name+(M.hardMode?' ⚔':'')));
   top.appendChild(el('div','coincount','<span class="coin-ic"></span>'+S.coins));
   s.appendChild(top);
 
@@ -524,14 +643,58 @@ SCREENS.matchend=function(){
   const r=finishMatchRewards();
   if(r.won) confettiBurst(s,50);
   s.appendChild(el('h2','title', r.won? '¡Ganaste la carrera!' : 'Carrera terminada'));
-  s.appendChild(el('div','small','Llegaste en el puesto '+r.place));
+  s.appendChild(el('div','small','Llegaste en el puesto '+r.place+(M.hardMode?' · ⚔ Modo Difícil':'')));
   s.appendChild(el('div','coincount','<span class="coin-ic"></span>+'+r.gain)).style.marginTop='8px';
-  if(r.won && M.worldIdx===S.worldsUnlocked-2+1) {} // no-op safeguard
+  if(r.leveled){ const lv=el('div','small popanim','⭐ ¡Subiste a nivel '+S.level+'!'); lv.style.color='var(--gold2)'; lv.style.fontWeight='800'; lv.style.marginTop='6px'; s.appendChild(lv); }
+  if(S.winStreak>1){ s.appendChild(el('div','small','🔥 Racha de victorias: '+S.winStreak)); }
   const btns=el('div','col'); btns.style.width='70%'; btns.style.marginTop='18px';
   const again=el('div','btn primary','Jugar de nuevo'); again.onclick=()=>{Aud.sfx('click'); startMatch(M.worldIdx);};
   const toWorlds=el('div','btn','Elegir mundo'); toWorlds.onclick=()=>{Aud.sfx('click'); Aud.startPad(); M=null; go('worldselect');};
   btns.appendChild(again); btns.appendChild(toWorlds);
   s.appendChild(btns);
+  return s;
+};
+
+/* ===================== MISIONES Y LOGROS ===================== */
+SCREENS.missions=function(){
+  ensureDaily();
+  const s=el('div','screen'); bgFx(s,['#ffd24d','#7fd6ff']); lights(s,10);
+  const top=el('div','topbar'); const back=el('div','btn ghost','←'); back.onclick=()=>go('menu'); top.appendChild(back);
+  top.appendChild(el('div','coincount','<span class="coin-ic"></span>'+S.coins)); s.appendChild(top);
+  s.appendChild(el('h2','title',' Misiones')).style.textAlign='center';
+  const wrap=el('div','col scroll'); wrap.style.padding='0 16px 24px';
+
+  wrap.appendChild(el('h3',null,'Hoy'));
+  S.daily.missions.forEach(m=>{
+    const prog=Math.min(m.target, missionProgress(m));
+    const done=prog>=m.target; const claimed=S.daily.claimed.includes(m.id);
+    const row=el('div','worldcard');
+    const info=el('div','col'); info.style.flex='1'; info.style.gap='2px';
+    info.appendChild(el('div',null,'<b>'+m.desc+'</b>'));
+    info.appendChild(el('div','small', prog+' / '+m.target+'  ·  +'+m.reward+' 💰'));
+    row.appendChild(info);
+    const bb=el('div','btn'+(done&&!claimed?' primary':''), claimed?'Hecho ✓':(done?'Reclamar':'...')); bb.style.padding='8px 12px';
+    if(done && !claimed){ bb.onclick=()=>{ Aud.sfx('reward'); claimMission(m.id); go('missions'); }; }
+    row.appendChild(bb);
+    wrap.appendChild(row);
+  });
+
+  wrap.appendChild(el('h3',null,'Logros'));
+  ACHIEVEMENTS.forEach(a=>{
+    const cur=Math.min(a.target, S.stats[a.stat]||0);
+    const done=cur>=a.target; const claimed=S.achClaimed.includes(a.id);
+    const row=el('div','worldcard');
+    const info=el('div','col'); info.style.flex='1'; info.style.gap='2px';
+    info.appendChild(el('div',null,'<b>'+a.desc+'</b>'));
+    info.appendChild(el('div','small', cur+' / '+a.target+'  ·  +'+a.reward+' 💰'));
+    row.appendChild(info);
+    const bb=el('div','btn'+(done&&!claimed?' primary':''), claimed?'Hecho ✓':(done?'Reclamar':'...')); bb.style.padding='8px 12px';
+    if(done && !claimed){ bb.onclick=()=>{ Aud.sfx('reward'); claimAchievement(a.id); go('missions'); }; }
+    row.appendChild(bb);
+    wrap.appendChild(row);
+  });
+
+  s.appendChild(wrap);
   return s;
 };
 
@@ -604,6 +767,8 @@ SCREENS.settings=function(){
 };
 
 /* ===================== BOOT ===================== */
+let loginBanner=checkLoginStreak();
+ensureDaily();
 if(window.Native) Native.init && Native.init();
 go('menu');
 </script>
